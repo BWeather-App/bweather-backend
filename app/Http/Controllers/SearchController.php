@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Carbon\Carbon;
+use Illuminate\Support\Str;
 
 class SearchController extends Controller
 {
@@ -19,70 +21,85 @@ class SearchController extends Controller
      * Endpoint: GET /api/search
      * Fungsi: Ambil cuaca 5 hari berdasarkan query atau lat/lon
      */
-    public function searchByCityName(Request $request)
-    {
-        $lat = $request->query('lat');
-        $lon = $request->query('lon');
-        $query = $request->query('query');
+   public function searchByCityName(Request $request)
+{
+    header('Access-Control-Allow-Origin: *');
 
-        if (!$lat || !$lon) {
-            // Ambil lat/lon dari query nama lokasi
-            if (!$query) {
-                return response()->json(['error' => 'Parameter query atau lat/lon dibutuhkan'], 400);
-            }
+    $lat = $request->query('lat');
+    $lon = $request->query('lon');
+    $query = $request->query('query');
 
-            $baseUrl = config('services.tomorrow.base_url');
-            $apiKey = config('services.tomorrow.key');
-            $location = urlencode($query);
-
-            $url = "{$baseUrl}/realtime?location={$location}&apikey={$apiKey}";
-            $response = Http::withOptions(['http_errors' => false])->get($url);
-
-            if ($response->status() === 429) {
-                return response()->json(['error' => 'API limit tercapai.'], 429);
-            }
-
-            $data = $response->json();
-
-            if (!isset($data['location']['lat']) || !isset($data['location']['lon'])) {
-                return response()->json(['error' => 'Lokasi tidak ditemukan'], 404);
-            }
-
-            $lat = $data['location']['lat'];
-            $lon = $data['location']['lon'];
+    if (!$lat || !$lon) {
+        if (!$query) {
+            return response()->json(['error' => 'Parameter query atau lat/lon dibutuhkan'], 400);
         }
 
-        // Ambil data cuaca lengkap
-        $weatherController = new WeatherController();
-        $result = $weatherController->getWeatherByGPSManual($lat, $lon, true);
+        $baseUrl = config('services.tomorrow.base_url');
+        $apiKey = config('services.tomorrow.key');
+        $location = urlencode($query);
 
-        $weather = $result['weather'];
-        $locationName = $result['location']['name'] ?? 'Lokasi';
+        $url = "{$baseUrl}/realtime?location={$location}&apikey={$apiKey}";
+        $response = Http::withOptions(['http_errors' => false])->get($url);
 
-        $labels = ['Kemarin', 'Hari Ini', 'Besok', 'Kamis', 'Jumat'];
-        $keys = ['kemarin', 'hari_ini', 'besok', 'hari_ke_3', 'hari_ke_4'];
-        $forecasts = [];
-
-        foreach ($keys as $i => $key) {
-            $cuaca = $weather[$key][0] ?? null;
-            if (!$cuaca) continue;
-
-            $tanggal = date('d/m', strtotime($cuaca['waktu']));
-            $ikon = $this->mapWeatherIcon($cuaca);
-
-            $forecasts[] = [
-                'label' => $labels[$i],
-                'tanggal' => $tanggal,
-                'ikon' => $ikon,
-                'suhu' => round($cuaca['suhu'] ?? 0)
-            ];
+        if ($response->status() === 429) {
+            return response()->json(['error' => 'API limit tercapai.'], 429);
         }
 
-        return response()->json([
-            'location' => $locationName,
-            'forecast' => $forecasts
-        ]);
+        $data = $response->json();
+
+        if (!isset($data['location']['lat']) || !isset($data['location']['lon'])) {
+            return response()->json(['error' => 'Lokasi tidak ditemukan'], 404);
+        }
+
+        $lat = $data['location']['lat'];
+        $lon = $data['location']['lon'];
     }
+
+    $weatherController = new WeatherController();
+    $result = $weatherController->getWeatherByGPSManual($lat, $lon, true);
+
+    $weather = $result['weather'];
+    $locationName = $result['location']['name'] ?? 'Lokasi';
+
+    $forecasts = [];
+
+    // Kemarin
+    $yesterday = $weather['kemarin'][0] ?? null;
+    if ($yesterday) {
+        $forecasts[] = [
+            'label' => 'Kemarin',
+            'tanggal' => Carbon::parse($yesterday['waktu'])->format('d/m'),
+            'ikon' => $this->mapWeatherIcon($yesterday),
+            'suhu' => round($yesterday['suhu'] ?? 0),
+        ];
+    }
+
+    // Hari ini hingga 4 hari ke depan
+    $labelMap = ['Hari Ini', 'Besok'];
+    $keys = ['hari_ini', 'besok','lusa' ,'hari_ke_3'];
+
+    foreach ($keys as $i => $key) {
+        $cuaca = $weather[$key][0] ?? null;
+        if (!$cuaca) continue;
+
+        $tanggal = Carbon::parse($cuaca['waktu']);
+        $label = $labelMap[$i] ?? Str::ucfirst($tanggal->translatedFormat('l'));
+
+   $forecasts[] = [
+    'label' => $label,
+    'tanggal' => $tanggal->format('d/m'),
+    'ikon' => $this->mapWeatherIcon($cuaca),
+    'suhu' => round($cuaca['suhu'] ?? $cuaca['max'] ?? $cuaca['min'] ?? 0),
+];
+
+    }
+
+    return response()->json([
+        'city' => $locationName,
+        'forecast' => $forecasts
+    ]);
+}
+
 
     /**
      * Endpoint: GET /api/suggest

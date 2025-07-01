@@ -21,84 +21,78 @@ class SearchController extends Controller
      * Endpoint: GET /api/search
      * Fungsi: Ambil cuaca 5 hari berdasarkan query atau lat/lon
      */
-   public function searchByCityName(Request $request)
-{
-    header('Access-Control-Allow-Origin: *');
+    public function searchByCityName(Request $request)
+    {
+        header('Access-Control-Allow-Origin: *');
 
-    $lat = $request->query('lat');
-    $lon = $request->query('lon');
-    $query = $request->query('query');
+        $lat = $request->query('lat');
+        $lon = $request->query('lon');
+        $query = $request->query('query');
 
-    if (!$lat || !$lon) {
+        if (!$lat || !$lon) {
         if (!$query) {
             return response()->json(['error' => 'Parameter query atau lat/lon dibutuhkan'], 400);
         }
 
-        $baseUrl = config('services.tomorrow.base_url');
-        $apiKey = config('services.tomorrow.key');
-        $location = urlencode($query);
+        $apiKey = env('GEOCODING_API_KEY');
+        $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=1";
 
-        $url = "{$baseUrl}/realtime?location={$location}&apikey={$apiKey}";
-        $response = Http::withOptions(['http_errors' => false])->get($url);
+        $res = Http::get($url);
+        $data = $res->json();
 
-        if ($response->status() === 429) {
-            return response()->json(['error' => 'API limit tercapai.'], 429);
-        }
-
-        $data = $response->json();
-
-        if (!isset($data['location']['lat']) || !isset($data['location']['lon'])) {
+        if (!isset($data['results'][0]['geometry'])) {
             return response()->json(['error' => 'Lokasi tidak ditemukan'], 404);
         }
 
-        $lat = $data['location']['lat'];
-        $lon = $data['location']['lon'];
+        $lat = $data['results'][0]['geometry']['lat'];
+        $lon = $data['results'][0]['geometry']['lng'];
+        }
+
+
+        $weatherController = new WeatherController();
+        $result = $weatherController->getWeatherByGPSManual($lat, $lon, true);
+
+        $weather = $result['weather'];
+        $locationName = $result['location']['name'] ?? 'Lokasi';
+
+        $forecasts = [];
+
+        // Kemarin
+        $yesterday = $weather['kemarin'][0] ?? null;
+        if ($yesterday) {
+            $forecasts[] = [
+                'label' => 'Kemarin',
+                'tanggal' => Carbon::parse($yesterday['waktu'])->format('d/m'),
+                'ikon' => $this->mapWeatherIcon($yesterday),
+                'suhu' => round($yesterday['suhu'] ?? 0),
+            ];
+        }
+
+        // Hari ini hingga 4 hari ke depan
+        $labelMap = ['Hari Ini', 'Besok'];
+        $keys = ['hari_ini', 'besok','lusa' ,'hari_ke_3'];
+
+        foreach ($keys as $i => $key) {
+            $cuaca = $weather[$key][0] ?? null;
+            if (!$cuaca) continue;
+
+            $tanggal = Carbon::parse($cuaca['waktu']);
+            $label = $labelMap[$i] ?? Str::ucfirst($tanggal->translatedFormat('l'));
+
+            $forecasts[] = [
+                'label' => $label,
+                'tanggal' => $tanggal->format('d/m'),
+                'ikon' => $this->mapWeatherIcon($cuaca),
+                'suhu' => round($cuaca['suhu'] ?? $cuaca['max'] ?? $cuaca['min'] ?? 0),
+            ];
+
+        }
+
+        return response()->json([
+            'city' => $locationName,
+            'forecast' => $forecasts
+        ]);
     }
-
-    $weatherController = new WeatherController();
-    $result = $weatherController->getWeatherByGPSManual($lat, $lon, true);
-
-    $weather = $result['weather'];
-    $locationName = $result['location']['name'] ?? 'Lokasi';
-
-    $forecasts = [];
-
-    // Kemarin
-    $yesterday = $weather['kemarin'][0] ?? null;
-    if ($yesterday) {
-        $forecasts[] = [
-            'label' => 'Kemarin',
-            'tanggal' => Carbon::parse($yesterday['waktu'])->format('d/m'),
-            'ikon' => $this->mapWeatherIcon($yesterday),
-            'suhu' => round($yesterday['suhu'] ?? 0),
-        ];
-    }
-
-    // Hari ini hingga 4 hari ke depan
-    $labelMap = ['Hari Ini', 'Besok'];
-    $keys = ['hari_ini', 'besok','lusa' ,'hari_ke_3'];
-
-    foreach ($keys as $i => $key) {
-        $cuaca = $weather[$key][0] ?? null;
-        if (!$cuaca) continue;
-
-        $tanggal = Carbon::parse($cuaca['waktu']);
-        $label = $labelMap[$i] ?? Str::ucfirst($tanggal->translatedFormat('l'));
-
-   $forecasts[] = [
-    'label' => $label,
-    'tanggal' => $tanggal->format('d/m'),
-    'ikon' => $this->mapWeatherIcon($cuaca),
-    'suhu' => round($cuaca['suhu'] ?? $cuaca['max'] ?? $cuaca['min'] ?? 0),
-];
-
-    }
-
-    return response()->json([
-        'city' => $locationName,
-        'forecast' => $forecasts
-    ]);
-}
 
 
     /**
@@ -113,7 +107,8 @@ class SearchController extends Controller
         }
 
         $apiKey = env('GEOCODING_API_KEY');
-        $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=5&countrycode=id";
+        $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=10&countrycode=id&language=id";
+
 
         $response = Http::get($url);
         $data = $response->json();
@@ -123,22 +118,33 @@ class SearchController extends Controller
         }
 
         $results = [];
+        $seen = []; // untuk menghindari duplikat
+
         foreach ($data['results'] as $result) {
             $components = $result['components'];
-            $city = $components['city']
-                ?? $components['town']
-                ?? $components['village']
-                ?? $components['county']
+            $city = $components['city'] 
+                ?? $components['town'] 
+                ?? $components['village'] 
+                ?? $components['county'] 
                 ?? null;
 
-            $region = $components['state'] ?? '';
+            $subregion = $components['county'] ?? ''; // misalnya Kabupaten
+            $region = $components['state'] ?? ''; // Jawa Timur
             $country = $components['country'] ?? '';
 
             if (!$city) continue;
 
+            // Buat nama lengkap lokasi
+            $fullName = trim("{$city}, {$subregion}, {$region}");
+            $uniqueKey = strtolower($fullName);
+
+            // Hindari duplikat berdasarkan full name
+            if (in_array($uniqueKey, $seen)) continue;
+            $seen[] = $uniqueKey;
+
             $results[] = [
                 'name' => $city,
-                'full' => "{$region}, {$country}",
+                'full' => $fullName,
                 'lat' => $result['geometry']['lat'],
                 'lon' => $result['geometry']['lng'],
             ];
@@ -146,6 +152,7 @@ class SearchController extends Controller
 
         return response()->json($results);
     }
+
 
     /**
      * Fungsi bantu: Ubah cuaca ke nama ikon

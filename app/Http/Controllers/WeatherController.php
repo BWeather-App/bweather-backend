@@ -4,8 +4,8 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use DateTime;
-use DateTimeZone;
+use App\Helpers\WeatherDataHelper;
+use App\Helpers\TimeHelper; 
 
 class WeatherController extends Controller
 {
@@ -30,8 +30,8 @@ class WeatherController extends Controller
         $perJam = $this->getHourlyForecast($lokasi);
         $astronomi = $this->getDailyAstronomy($lokasi);
         $kemarin = $this->getYesterdayWeather($lokasi);
-        $realtime = $this->getRealtimeWeather($lokasi);
-
+        $realtime = $this->getRealtimeWeather($lokasi, $perJam);
+        
         $hariIni = date('Y-m-d');
         $besok = date('Y-m-d', strtotime('+1 day'));
         $lusa = date('Y-m-d', strtotime('+2 day'));
@@ -39,19 +39,19 @@ class WeatherController extends Controller
 
         $dataCuaca = [
             'cuaca_saat_ini' => $realtime,
-            'kemarin' => $this->mapHourlyData($kemarin),
-            'hari_ini' => $this->gabungCuacaAstronomi($perJam[$hariIni] ?? [], $astronomi[$hariIni] ?? []),
-            'besok' => $this->gabungCuacaAstronomi($perJam[$besok] ?? [], $astronomi[$besok] ?? []),
-            'lusa' => $this->gabungCuacaAstronomi($perJam[$lusa] ?? [], $astronomi[$lusa] ?? []),
-            'hari_ke_3' => $this->gabungCuacaAstronomi($perJam[$hariKe3] ?? [], $astronomi[$hariKe3] ?? []),
+            'kemarin' => WeatherDataHelper::mapHourlyData($kemarin),
+            'hari_ini' => WeatherDataHelper::gabungCuacaAstronomi($perJam[$hariIni] ?? [], $astronomi[$hariIni] ?? []),
+            'besok' => WeatherDataHelper::gabungCuacaAstronomi ($perJam[$besok] ?? [], $astronomi[$besok] ?? []),
+            'lusa' => WeatherDataHelper::gabungCuacaAstronomi ($perJam[$lusa] ?? [], $astronomi[$lusa] ?? []),
+            'hari_ke_3' => WeatherDataHelper::gabungCuacaAstronomi ($perJam[$hariKe3] ?? [], $astronomi[$hariKe3] ?? []),
         ];
 
-        $name = $this->getPlaceNameFromLatLon($latitude, $longitude);
-        $locationInfo = [
+        $lokasi = $this->getPlaceNameFromLatLon($latitude, $longitude);
+        $locationInfo = array_merge([
             'lat' => floatval($latitude),
             'lon' => floatval($longitude),
-            'name' => $name,
-        ];
+        ], $lokasi);
+
 
         $result = [
             'location' => $locationInfo,
@@ -65,140 +65,150 @@ class WeatherController extends Controller
         exit;
     }
 
-    private function getRealtimeWeather($lokasi)
+    private function getRealtimeWeather($lokasi,$hourlyData = [])
     {
-        $url = config('services.tomorrow.base_url') . "/realtime?location=" . urlencode($lokasi) . "&apikey=" . config('services.tomorrow.key');
+        $apiKey = config('services.weatherapi.key');
+        $baseUrl = config('services.weatherapi.base_url');
+        $url = "{$baseUrl}/current.json?key={$apiKey}&q=" . urlencode($lokasi);
+
         $response = $this->fetchData($url);
         $data = json_decode($response, true);
 
-        if (!isset($data['data']['values'])) return ['kesalahan' => 'Data realtime tidak ditemukan'];
+        if (!isset($data['current'])) return ['kesalahan' => 'Data realtime tidak ditemukan'];
 
-        $v = $data['data']['values'];
-        $utc = $data['data']['time'];
-        $wib = $this->convertToWIB($utc);
+        $v = $data['current'];
+        $wib = $v['last_updated'] ?? null; // sudah WIB
 
+         // Estimasi peluang hujan dari forecast
+        $peluangHujan = null;
+        $flatten = [];
+            foreach ($hourlyData as $perTanggal) {
+                foreach ($perTanggal as $jam) {
+                    $flatten[] = $jam;
+                }
+            }
+        $now = (new \DateTime('now', new \DateTimeZone('Asia/Jakarta')))->format('Y-m-d H:00');
+
+        foreach ($flatten as $jam) {
+            $jamWaktu = \DateTime::createFromFormat('Y-m-d H:i', $jam['time'], new \DateTimeZone('UTC'));
+            if ($jamWaktu) {
+                $jamWaktu->setTimezone(new \DateTimeZone('Asia/Jakarta'));
+                $jamFormatted = $jamWaktu->format('Y-m-d H:00');
+
+                if ($jamFormatted === $now) {
+                    $peluangHujan = $jam['values']['precipitationProbability'] ?? null;
+                    break;
+                }
+            }
+        }
+
+        
         return [
             'waktu' => $wib,
-            'suhu' => $v['temperature'] ?? null,
+            'suhu' => $v['temp_c'] ?? null,
             'kelembapan' => $v['humidity'] ?? null,
-            'kecepatan_angin' => $v['windSpeed'] ?? null,
-            'arah_angin' => $v['windDirection'] ?? null,
-            'tekanan_udara' => $v['pressureSurfaceLevel'] ?? null,
-            'indeks_uv' => $v['uvIndex'] ?? null,
-            'terasa_seperti' => $v['temperatureApparent'] ?? null,
-            'peluang_hujan' => $v['precipitationProbability'] ?? null,
+            'kecepatan_angin' => $v['wind_kph'] ?? null,
+            'arah_angin' => $v['wind_degree'] ?? null,
+            'tekanan_udara' => $v['pressure_mb'] ?? null,
+            'indeks_uv' => $v['uv'] ?? null,
+            'terasa_seperti' => $v['feelslike_c'] ?? null,
+            'peluang_hujan' => $peluangHujan, // tidak tersedia di current.json
         ];
     }
 
     private function getHourlyForecast($lokasi)
     {
-        $url = config('services.tomorrow.base_url') . "/forecast?location=" . urlencode($lokasi) . "&apikey=" . config('services.tomorrow.key');
+        $apiKey = config('services.weatherapi.key');
+        $baseUrl = config('services.weatherapi.base_url');
+        $url = "{$baseUrl}/forecast.json?key={$apiKey}&q=" . urlencode($lokasi) . "&days=5&aqi=no&alerts=no";
+
+
         $response = $this->fetchData($url);
         $data = json_decode($response, true);
 
-        if (!isset($data['timelines']['hourly'])) return [];
-        return $this->groupByDate($data['timelines']['hourly']);
-    }
-
-    private function getYesterdayWeather($lokasi)
-    {
-        $url = config('services.tomorrow.base_url') . "/history/recent?location=" . urlencode($lokasi) . "&apikey=" . config('services.tomorrow.key');
-        $response = $this->fetchData($url);
-        $data = json_decode($response, true);
-
-        if (!isset($data['timelines']['hourly'])) return [];
-        $tanggal = date('Y-m-d', strtotime('-1 day'));
-        $kelompok = $this->groupByDate($data['timelines']['hourly']);
-        return $kelompok[$tanggal] ?? [];
-    }
-
-    private function getDailyAstronomy($lokasi)
-    {
-        $url = config('services.tomorrow.base_url') . "/forecast?location=" . urlencode($lokasi) . "&apikey=" . config('services.tomorrow.key');
-        $response = $this->fetchData($url);
-        $data = json_decode($response, true);
+        if (!isset($data['forecast']['forecastday'])) return [];
 
         $hasil = [];
-        if (isset($data['timelines']['daily'])) {
-            foreach ($data['timelines']['daily'] as $item) {
-                $tanggal = substr($item['time'], 0, 10);
-                $v = $item['values'];
-                $hasil[$tanggal] = [
-                    'matahari_terbit' => $this->convertToWIB($v['sunriseTime'] ?? null),
-                    'matahari_terbenam' => $this->convertToWIB($v['sunsetTime'] ?? null),
-                    'bulan_terbit' => $this->convertToWIB($v['moonriseTime'] ?? null),
-                    'bulan_terbenam' => $this->convertToWIB($v['moonsetTime'] ?? null),
+
+        foreach ($data['forecast']['forecastday'] as $hari) {
+            foreach ($hari['hour'] as $jam) {
+                $hasil[] = [
+                    'time' => $jam['time'],
+                    'values' => [
+                        'temperature' => $jam['temp_c'] ?? null,
+                        'humidity' => $jam['humidity'] ?? null,
+                        'windSpeed' => $jam['wind_kph'] ?? null,
+                        'windDirection' => $jam['wind_degree'] ?? null,
+                        'pressureSurfaceLevel' => $jam['pressure_mb'] ?? null,
+                        'uvIndex' => $jam['uv'] ?? null,
+                        'temperatureApparent' => $jam['feelslike_c'] ?? null,
+                        'precipitationProbability' => $jam['chance_of_rain'] ?? null,
+                    ]
                 ];
             }
         }
 
-        return $hasil;
+        return WeatherDataHelper::groupByDate($hasil);
     }
 
-    private function gabungCuacaAstronomi($cuacaPerJam, $astronomi)
+    private function getYesterdayWeather($lokasi)
     {
-        $hasil = [];
-        foreach ($cuacaPerJam as $item) {
-            $waktuWIB = $this->convertToWIB($item['time']);
-            $v = $item['values'];
+        $apiKey = config('services.weatherapi.key');
+        $baseUrl = config('services.weatherapi.base_url');
+        $tanggalKemarin = date('Y-m-d', strtotime('-1 day'));
+        $url = "{$baseUrl}/history.json?key={$apiKey}&q=" . urlencode($lokasi) . "&dt={$tanggalKemarin}";
 
+        $response = $this->fetchData($url);
+        $data = json_decode($response, true);
+
+        if (!isset($data['forecast']['forecastday'][0]['hour'])) return [];
+
+        $hasil = [];
+        foreach ($data['forecast']['forecastday'][0]['hour'] as $jam) {
             $hasil[] = [
-                'waktu' => $waktuWIB,
-                'suhu' => $v['temperature'] ?? null,
-                'kelembapan' => $v['humidity'] ?? null,
-                'kecepatan_angin' => $v['windSpeed'] ?? null,
-                'arah_angin' => $v['windDirection'] ?? null,
-                'tekanan_udara' => $v['pressureSurfaceLevel'] ?? null,
-                'indeks_uv' => $v['uvIndex'] ?? null,
-                'terasa_seperti' => $v['temperatureApparent'] ?? null,
-                'peluang_hujan' => $v['precipitationProbability'] ?? null,
-                'matahari_terbit' => $astronomi['matahari_terbit'] ?? null,
-                'matahari_terbenam' => $astronomi['matahari_terbenam'] ?? null,
-                'bulan_terbit' => $astronomi['bulan_terbit'] ?? null,
-                'bulan_terbenam' => $astronomi['bulan_terbenam'] ?? null,
+                'time' => $jam['time'],
+                'values' => [
+                    'temperature' => $jam['temp_c'] ?? null,
+                    'humidity' => $jam['humidity'] ?? null,
+                    'windSpeed' => $jam['wind_kph'] ?? null,
+                    'windDirection' => $jam['wind_degree'] ?? null,
+                    'pressureSurfaceLevel' => $jam['pressure_mb'] ?? null,
+                    'uvIndex' => $jam['uv'] ?? null,
+                    'temperatureApparent' => $jam['feelslike_c'] ?? null,
+                    'precipitationProbability' => $jam['chance_of_rain'] ?? null,
+                ]
             ];
         }
+
         return $hasil;
     }
 
-    private function mapHourlyData($data)
+    private function getDailyAstronomy($lokasi)
     {
-        $hasil = [];
-        foreach ($data as $item) {
-            $waktuWIB = $this->convertToWIB($item['time']);
-            $v = $item['values'];
-            $hasil[] = [
-                'waktu' => $waktuWIB,
-                'suhu' => $v['temperature'] ?? null,
-                'kelembapan' => $v['humidity'] ?? null,
-                'kecepatan_angin' => $v['windSpeed'] ?? null,
-                'arah_angin' => $v['windDirection'] ?? null,
-                'tekanan_udara' => $v['pressureSurfaceLevel'] ?? null,
-                'indeks_uv' => $v['uvIndex'] ?? null,
-                'terasa_seperti' => $v['temperatureApparent'] ?? null,
-                'peluang_hujan' => $v['precipitationProbability'] ?? null,
-            ];
-        }
-        return $hasil;
-    }
+            $apiKey = config('services.weatherapi.key');
+            $baseUrl = config('services.weatherapi.base_url');
+            $url = "{$baseUrl}/forecast.json?key={$apiKey}&q=" . urlencode($lokasi) . "&days=5&aqi=no&alerts=no";
 
-    private function convertToWIB($utc)
-    {
-        if (!$utc) return null;
-        $dt = new DateTime($utc);
-        $dt->setTimezone(new DateTimeZone('Asia/Jakarta'));
-        return $dt->format('Y-m-d H:i:s');
-    }
+            $response = $this->fetchData($url);
+            $data = json_decode($response, true);
 
-    private function groupByDate($data)
-    {
-        $kelompok = [];
-        foreach ($data as $item) {
-            if (!isset($item['time'])) continue;
-            $tanggal = substr($item['time'], 0, 10);
-            $kelompok[$tanggal][] = $item;
-        }
-        return $kelompok;
+            $hasil = [];
+
+            if (isset($data['forecast']['forecastday'])) {
+                foreach ($data['forecast']['forecastday'] as $day) {
+                    $tanggal = $day['date'] ?? null;
+                    $astro = $day['astro'] ?? [];
+
+                    $hasil[$tanggal] = [
+                        'matahari_terbit' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['sunrise'] ?? null),
+                        'matahari_terbenam' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['sunset'] ?? null),
+                        'bulan_terbit' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['moonrise'] ?? null),
+                        'bulan_terbenam' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['moonset'] ?? null),
+                    ];
+                }
+            }
+
+            return $hasil;
     }
 
     private function fetchData($url)
@@ -234,20 +244,71 @@ class WeatherController extends Controller
         if (isset($data['results'][0]['components'])) {
             $components = $data['results'][0]['components'];
 
-            $cityOrRegency = $components['city']
+            $city = $components['city']
                 ?? $components['municipality']
                 ?? $components['town']
                 ?? $components['county']
                 ?? $components['region']
                 ?? null;
 
-            $province = $components['state'] ?? null;
+            $region = $components['state'] ?? null;
+            $country = $components['country'] ?? null;
 
-            if ($cityOrRegency && $province) {
-                return "$cityOrRegency, $province";
-            }
+            return [
+                'city' => $this->translateCity($city ?? 'Kota Tidak Diketahui'),
+                'region' => $this->translateRegion($region ?? 'Wilayah Tidak Diketahui'),
+                'country' => $this->translateCountry($country ?? 'Negara Tidak Diketahui'),
+            ];
         }
 
-        return 'Lokasi Tidak Dikenal';
+        return [
+            'city' => 'Tidak Diketahui',
+            'region' => '',
+            'country' => ''
+        ];
     }
+
+    private function translateCountry($country)
+    {
+        $map = [
+            'Indonesia' => 'Indonesia',
+            'United States' => 'Amerika Serikat',
+            'Japan' => 'Jepang',
+            'Malaysia' => 'Malaysia',
+            'Singapore' => 'Singapura',
+            'Thailand' => 'Thailand',
+            'Philippines' => 'Filipina',
+            // Tambahkan sesuai kebutuhan
+        ];
+
+        return $map[$country] ?? $country;
+    }
+
+    private function translateRegion($region)
+    {
+        // Contoh konversi jika ingin nama provinsi disesuaikan
+        $map = [
+            'East Java' => 'Jawa Timur',
+            'West Java' => 'Jawa Barat',
+            'Central Java' => 'Jawa Tengah',
+            'Jakarta' => 'DKI Jakarta',
+            // Tambah jika perlu
+        ];
+
+        return $map[$region] ?? $region;
+    }
+
+    private function translateCity($city)
+    {
+        $map = [
+            'Kediri City' => 'Kota Kediri',
+            'Surabaya' => 'Surabaya',
+            'Jakarta' => 'Jakarta',
+            'Bandung' => 'Bandung',
+            // Tambah jika perlu
+        ];
+
+        return $map[$city] ?? $city;
+    }
+
 }

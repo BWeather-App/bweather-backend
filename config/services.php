@@ -35,9 +35,10 @@ return [
     //     ],
     // ],
 
-    'tomorrow' => [
-        'key' => env('TOMORROW_API_KEY'),
-        'base_url' => env('TOMORROW_BASE_URL'),
-    ],
+    'weatherapi' => [
+    'key' => env('WEATHERAPI_API_KEY'),
+    'base_url' => env('WEATHERAPI_BASE_URL'),
+],
+
 
 ];

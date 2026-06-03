@@ -4,8 +4,9 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Cache;
 use App\Helpers\WeatherDataHelper;
-use App\Helpers\TimeHelper; 
+use App\Helpers\TimeHelper;
 
 class WeatherController extends Controller
 {
@@ -15,300 +16,354 @@ class WeatherController extends Controller
         $lon = $request->query('lon');
 
         if (!$lat || !$lon) {
-            return response()->json(['error' => 'Latitude dan longitude wajib diisi'], 400);
+            return response()->json(
+                ['error' => 'Latitude dan longitude wajib diisi'],
+                400
+            );
         }
 
-        $result = $this->getWeatherByGPSManual($lat, $lon, true);
+        $result = $this->buildWeatherData($lat, $lon);
 
         return response()->json($result);
     }
 
-    public function getWeatherByGPSManual($latitude, $longitude, $returnData = false)
+    /**
+     * Manual entry point — dipanggil dari SearchController & controller lain.
+     * Tidak menerima Request object, langsung menerima lat/lon.
+     * Return format sama dengan getWeatherByGPS: {location, weather}.
+     */
+    public function getWeatherByGPSManual($lat, $lon)
     {
-        $lokasi = $latitude . "," . $longitude;
+        return $this->buildWeatherData($lat, $lon);
+    }
 
-        $perJam = $this->getHourlyForecast($lokasi);
-        $astronomi = $this->getDailyAstronomy($lokasi);
-        $kemarin = $this->getYesterdayWeather($lokasi);
+    // ─────────────────────────────────────────────────────────────────────
+    // Build Weather Data
+    //
+    // CACHING: Hasil di-cache per koordinat selama 30 menit (configurable
+    // via WEATHER_CACHE_TTL di .env). Menghemat 4 call eksternal per
+    // request yang identik → krusial untuk WeatherAPI Free Tier.
+    //
+    // SEBELUM: 3 request ke WeatherAPI
+    //   1. getHourlyForecast()  → forecast.json?days=5
+    //   2. getDailyAstronomy()  → forecast.json?days=5  ← DUPLIKAT!
+    //   3. getYesterdayWeather() → history.json
+    //
+    // SESUDAH: 2 request ke WeatherAPI
+    //   1. getForecastAndAstronomy() → forecast.json?days=5 (1x saja)
+    //   2. getYesterdayWeather()     → history.json
+    // ─────────────────────────────────────────────────────────────────────
+
+    private function buildWeatherData($latitude, $longitude)
+    {
+        $cacheKey = 'weather_' . round($latitude, 3) . '_' . round($longitude, 3);
+        $ttl = (int) env('WEATHER_CACHE_TTL', 30);
+
+        return Cache::remember($cacheKey, now()->addMinutes($ttl), function () use ($latitude, $longitude) {
+        $lokasi = "$latitude,$longitude";
+
+        // ✅ 1 request untuk hourly + astronomy (sebelumnya 2 request)
+        ['hourly' => $perJam, 'astronomy' => $astronomi] =
+            $this->getForecastAndAstronomy($lokasi);
+
+        $kemarin  = $this->getYesterdayWeather($lokasi);
         $realtime = $this->getRealtimeWeather($lokasi, $perJam);
-        
+
         $hariIni = date('Y-m-d');
-        $besok = date('Y-m-d', strtotime('+1 day'));
-        $lusa = date('Y-m-d', strtotime('+2 day'));
+        $besok   = date('Y-m-d', strtotime('+1 day'));
+        $lusa    = date('Y-m-d', strtotime('+2 day'));
         $hariKe3 = date('Y-m-d', strtotime('+3 day'));
 
         $dataCuaca = [
             'cuaca_saat_ini' => $realtime,
-            'kemarin' => WeatherDataHelper::mapHourlyData($kemarin),
-            'hari_ini' => WeatherDataHelper::gabungCuacaAstronomi($perJam[$hariIni] ?? [], $astronomi[$hariIni] ?? []),
-            'besok' => WeatherDataHelper::gabungCuacaAstronomi ($perJam[$besok] ?? [], $astronomi[$besok] ?? []),
-            'lusa' => WeatherDataHelper::gabungCuacaAstronomi ($perJam[$lusa] ?? [], $astronomi[$lusa] ?? []),
-            'hari_ke_3' => WeatherDataHelper::gabungCuacaAstronomi ($perJam[$hariKe3] ?? [], $astronomi[$hariKe3] ?? []),
+            'kemarin'  => WeatherDataHelper::mapHourlyData($kemarin),
+            'hari_ini' => WeatherDataHelper::gabungCuacaAstronomi(
+                $perJam[$hariIni] ?? [], $astronomi[$hariIni] ?? []
+            ),
+            'besok' => WeatherDataHelper::gabungCuacaAstronomi(
+                $perJam[$besok] ?? [], $astronomi[$besok] ?? []
+            ),
+            'lusa' => WeatherDataHelper::gabungCuacaAstronomi(
+                $perJam[$lusa] ?? [], $astronomi[$lusa] ?? []
+            ),
+            'hari_ke_3' => WeatherDataHelper::gabungCuacaAstronomi(
+                $perJam[$hariKe3] ?? [], $astronomi[$hariKe3] ?? []
+            ),
         ];
 
-        $lokasi = $this->getPlaceNameFromLatLon($latitude, $longitude);
-        $locationInfo = array_merge([
-            'lat' => floatval($latitude),
-            'lon' => floatval($longitude),
-        ], $lokasi);
+        $lokasiInfo = array_merge(
+            ['lat' => floatval($latitude), 'lon' => floatval($longitude)],
+            $this->getPlaceNameFromLatLon($latitude, $longitude)
+        );
 
-
-        $result = [
-            'location' => $locationInfo,
-            'weather' => $dataCuaca,
+        return [
+            'location' => $lokasiInfo,
+            'weather'  => $dataCuaca,
         ];
+    });
+}
 
-        if ($returnData) return $result;
+// ─────────────────────────────────────────────────────────────────────
+// Realtime Weather
+    // ─────────────────────────────────────────────────────────────────────
 
-        header('Content-Type: application/json');
-        echo json_encode($result);
-        exit;
-    }
-
-    private function getRealtimeWeather($lokasi,$hourlyData = [])
+    private function getRealtimeWeather(string $lokasi, array $hourlyData = []): array
     {
-        $apiKey = config('services.weatherapi.key');
-        $baseUrl = config('services.weatherapi.base_url');
-        $url = "{$baseUrl}/current.json?key={$apiKey}&q=" . urlencode($lokasi);
+        $url = $this->buildUrl('current.json', $lokasi);
 
-        $response = $this->fetchData($url);
-        $data = json_decode($response, true);
+        // ✅ Http facade — bukan curl manual
+        $response = Http::timeout(10)->get($url);
 
-        if (!isset($data['current'])) return ['kesalahan' => 'Data realtime tidak ditemukan'];
-
-        $v = $data['current'];
-        $wib = $v['last_updated'] ?? null; // sudah WIB
-
-         // Estimasi peluang hujan dari forecast
-        $peluangHujan = null;
-        $flatten = [];
-            foreach ($hourlyData as $perTanggal) {
-                foreach ($perTanggal as $jam) {
-                    $flatten[] = $jam;
-                }
-            }
-        $now = (new \DateTime('now', new \DateTimeZone('Asia/Jakarta')))->format('Y-m-d H:00');
-
-        foreach ($flatten as $jam) {
-            $jamWaktu = \DateTime::createFromFormat('Y-m-d H:i', $jam['time'], new \DateTimeZone('UTC'));
-            if ($jamWaktu) {
-                $jamWaktu->setTimezone(new \DateTimeZone('Asia/Jakarta'));
-                $jamFormatted = $jamWaktu->format('Y-m-d H:00');
-
-                if ($jamFormatted === $now) {
-                    $peluangHujan = $jam['values']['precipitationProbability'] ?? null;
-                    break;
-                }
-            }
+        if ($response->failed()) {
+            return ['kesalahan' => 'Data realtime tidak ditemukan'];
         }
 
-        
+        $data = $response->json();
+        if (!isset($data['current'])) {
+            return ['kesalahan' => 'Data realtime tidak ditemukan'];
+        }
+
+        $v = $data['current'];
+
+        // Estimasi peluang hujan dari data forecast per jam
+        $peluangHujan = $this->estimateRainChance($hourlyData);
+
         return [
-            'waktu' => $wib,
-            'suhu' => $v['temp_c'] ?? null,
-            'kelembapan' => $v['humidity'] ?? null,
-            'kecepatan_angin' => $v['wind_kph'] ?? null,
-            'arah_angin' => $v['wind_degree'] ?? null,
-            'tekanan_udara' => $v['pressure_mb'] ?? null,
-            'indeks_uv' => $v['uv'] ?? null,
+            'waktu'          => $v['last_updated'] ?? null,
+            'suhu'           => $v['temp_c'] ?? null,
+            'kelembapan'     => $v['humidity'] ?? null,
+            'kecepatan_angin'=> $v['wind_kph'] ?? null,
+            'arah_angin'     => $v['wind_degree'] ?? null,
+            'tekanan_udara'  => $v['pressure_mb'] ?? null,
+            'indeks_uv'      => $v['uv'] ?? null,
             'terasa_seperti' => $v['feelslike_c'] ?? null,
-            'peluang_hujan' => $peluangHujan, // tidak tersedia di current.json
+            'peluang_hujan'  => $peluangHujan,
         ];
     }
 
-    private function getHourlyForecast($lokasi)
+    // ─────────────────────────────────────────────────────────────────────
+    // Forecast + Astronomy — 1 request, 2 hasil
+    //
+    // Menggantikan getHourlyForecast() + getDailyAstronomy()
+    // yang sebelumnya hit endpoint yang sama dua kali.
+    // ─────────────────────────────────────────────────────────────────────
+
+    private function getForecastAndAstronomy(string $lokasi): array
     {
-        $apiKey = config('services.weatherapi.key');
-        $baseUrl = config('services.weatherapi.base_url');
-        $url = "{$baseUrl}/forecast.json?key={$apiKey}&q=" . urlencode($lokasi) . "&days=5&aqi=no&alerts=no";
+        $url = $this->buildUrl('forecast.json', $lokasi, ['days' => 5]);
 
+        // ✅ Http facade — bukan curl manual
+        $response = Http::timeout(10)->get($url);
 
-        $response = $this->fetchData($url);
-        $data = json_decode($response, true);
+        if ($response->failed()) {
+            return ['hourly' => [], 'astronomy' => []];
+        }
 
-        if (!isset($data['forecast']['forecastday'])) return [];
+        $data = $response->json();
 
-        $hasil = [];
+        if (!isset($data['forecast']['forecastday'])) {
+            return ['hourly' => [], 'astronomy' => []];
+        }
 
-        foreach ($data['forecast']['forecastday'] as $hari) {
-            foreach ($hari['hour'] as $jam) {
-                $hasil[] = [
-                    'time' => $jam['time'],
+        $hourlyRaw  = [];
+        $astronomyResult = [];
+
+        foreach ($data['forecast']['forecastday'] as $day) {
+            $tanggal = $day['date'] ?? null;
+
+            // Hourly data
+            foreach ($day['hour'] as $jam) {
+                $hourlyRaw[] = [
+                    'time'   => $jam['time'],
                     'values' => [
-                        'temperature' => $jam['temp_c'] ?? null,
-                        'humidity' => $jam['humidity'] ?? null,
-                        'windSpeed' => $jam['wind_kph'] ?? null,
-                        'windDirection' => $jam['wind_degree'] ?? null,
-                        'pressureSurfaceLevel' => $jam['pressure_mb'] ?? null,
-                        'uvIndex' => $jam['uv'] ?? null,
-                        'temperatureApparent' => $jam['feelslike_c'] ?? null,
-                        'precipitationProbability' => $jam['chance_of_rain'] ?? null,
-                    ]
+                        'temperature'             => $jam['temp_c'] ?? null,
+                        'humidity'                => $jam['humidity'] ?? null,
+                        'windSpeed'               => $jam['wind_kph'] ?? null,
+                        'windDirection'           => $jam['wind_degree'] ?? null,
+                        'pressureSurfaceLevel'    => $jam['pressure_mb'] ?? null,
+                        'uvIndex'                 => $jam['uv'] ?? null,
+                        'temperatureApparent'     => $jam['feelslike_c'] ?? null,
+                        'precipitationProbability'=> $jam['chance_of_rain'] ?? null,
+                    ],
+                ];
+            }
+
+            // Astronomy data — diambil dari request yang sama
+            if ($tanggal && isset($day['astro'])) {
+                $astro = $day['astro'];
+                $astronomyResult[$tanggal] = [
+                    'matahari_terbit'   => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['sunrise'] ?? null),
+                    'matahari_terbenam' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['sunset'] ?? null),
+                    'bulan_terbit'      => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['moonrise'] ?? null),
+                    'bulan_terbenam'    => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['moonset'] ?? null),
                 ];
             }
         }
 
-        return WeatherDataHelper::groupByDate($hasil);
+        return [
+            'hourly'    => WeatherDataHelper::groupByDate($hourlyRaw),
+            'astronomy' => $astronomyResult,
+        ];
     }
 
-    private function getYesterdayWeather($lokasi)
+    // ─────────────────────────────────────────────────────────────────────
+    // Yesterday Weather
+    // ─────────────────────────────────────────────────────────────────────
+
+    private function getYesterdayWeather(string $lokasi): array
     {
-        $apiKey = config('services.weatherapi.key');
-        $baseUrl = config('services.weatherapi.base_url');
         $tanggalKemarin = date('Y-m-d', strtotime('-1 day'));
-        $url = "{$baseUrl}/history.json?key={$apiKey}&q=" . urlencode($lokasi) . "&dt={$tanggalKemarin}";
+        $url = $this->buildUrl('history.json', $lokasi, ['dt' => $tanggalKemarin]);
 
-        $response = $this->fetchData($url);
-        $data = json_decode($response, true);
+        // ✅ Http facade — bukan curl manual
+        $response = Http::timeout(10)->get($url);
 
+        if ($response->failed()) return [];
+
+        $data = $response->json();
         if (!isset($data['forecast']['forecastday'][0]['hour'])) return [];
 
         $hasil = [];
         foreach ($data['forecast']['forecastday'][0]['hour'] as $jam) {
             $hasil[] = [
-                'time' => $jam['time'],
+                'time'   => $jam['time'],
                 'values' => [
-                    'temperature' => $jam['temp_c'] ?? null,
-                    'humidity' => $jam['humidity'] ?? null,
-                    'windSpeed' => $jam['wind_kph'] ?? null,
-                    'windDirection' => $jam['wind_degree'] ?? null,
-                    'pressureSurfaceLevel' => $jam['pressure_mb'] ?? null,
-                    'uvIndex' => $jam['uv'] ?? null,
-                    'temperatureApparent' => $jam['feelslike_c'] ?? null,
-                    'precipitationProbability' => $jam['chance_of_rain'] ?? null,
-                ]
+                    'temperature'             => $jam['temp_c'] ?? null,
+                    'humidity'                => $jam['humidity'] ?? null,
+                    'windSpeed'               => $jam['wind_kph'] ?? null,
+                    'windDirection'           => $jam['wind_degree'] ?? null,
+                    'pressureSurfaceLevel'    => $jam['pressure_mb'] ?? null,
+                    'uvIndex'                 => $jam['uv'] ?? null,
+                    'temperatureApparent'     => $jam['feelslike_c'] ?? null,
+                    'precipitationProbability'=> $jam['chance_of_rain'] ?? null,
+                ],
             ];
         }
 
         return $hasil;
     }
 
-    private function getDailyAstronomy($lokasi)
-    {
-            $apiKey = config('services.weatherapi.key');
-            $baseUrl = config('services.weatherapi.base_url');
-            $url = "{$baseUrl}/forecast.json?key={$apiKey}&q=" . urlencode($lokasi) . "&days=5&aqi=no&alerts=no";
+    // ─────────────────────────────────────────────────────────────────────
+    // Get Place Name from Lat/Lon
+    // ─────────────────────────────────────────────────────────────────────
 
-            $response = $this->fetchData($url);
-            $data = json_decode($response, true);
-
-            $hasil = [];
-
-            if (isset($data['forecast']['forecastday'])) {
-                foreach ($data['forecast']['forecastday'] as $day) {
-                    $tanggal = $day['date'] ?? null;
-                    $astro = $day['astro'] ?? [];
-
-                    $hasil[$tanggal] = [
-                        'matahari_terbit' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['sunrise'] ?? null),
-                        'matahari_terbenam' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['sunset'] ?? null),
-                        'bulan_terbit' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['moonrise'] ?? null),
-                        'bulan_terbenam' => TimeHelper::convertToWIBFromTimeOnly($tanggal, $astro['moonset'] ?? null),
-                    ];
-                }
-            }
-
-            return $hasil;
-    }
-
-    private function fetchData($url)
-    {
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_HEADER, true);
-        $response = curl_exec($ch);
-
-        $header_size = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        $body = substr($response, $header_size);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($http_code === 429) {
-            header('Content-Type: application/json');
-            echo json_encode(['error' => 'API kamu limit brok, bayar dulu sana 😤']);
-            exit;
-        }
-
-        return $body;
-    }
-
-    private function getPlaceNameFromLatLon($lat, $lon)
+    private function getPlaceNameFromLatLon($lat, $lon): array
     {
         $apiKey = env('GEOCODING_API_KEY');
-        $url = "https://api.opencagedata.com/geocode/v1/json?q=$lat+$lon&key=$apiKey";
+        $response = Http::timeout(10)->get(
+            "https://api.opencagedata.com/geocode/v1/json",
+            ['q' => "$lat+$lon", 'key' => $apiKey]
+        );
 
-        $res = Http::get($url)->body();
-        $data = json_decode($res, true);
-
-        if (isset($data['results'][0]['components'])) {
-            $components = $data['results'][0]['components'];
-
-            $city = $components['city']
-                ?? $components['municipality']
-                ?? $components['town']
-                ?? $components['county']
-                ?? $components['region']
-                ?? null;
-
-            $region = $components['state'] ?? null;
-            $country = $components['country'] ?? null;
-
-            return [
-                'city' => $this->translateCity($city ?? 'Kota Tidak Diketahui'),
-                'region' => $this->translateRegion($region ?? 'Wilayah Tidak Diketahui'),
-                'country' => $this->translateCountry($country ?? 'Negara Tidak Diketahui'),
-            ];
+        if ($response->failed()) {
+            return ['city' => 'Tidak Diketahui', 'region' => '', 'country' => ''];
         }
 
+        $data = $response->json();
+
+        if (!isset($data['results'][0]['components'])) {
+            return ['city' => 'Tidak Diketahui', 'region' => '', 'country' => ''];
+        }
+
+        $c = $data['results'][0]['components'];
+
+        $city = $c['city']
+            ?? $c['municipality']
+            ?? $c['town']
+            ?? $c['county']
+            ?? $c['region']
+            ?? null;
+
         return [
-            'city' => 'Tidak Diketahui',
-            'region' => '',
-            'country' => ''
+            'city'    => $this->translateCity($city ?? 'Kota Tidak Diketahui'),
+            'region'  => $this->translateRegion($c['state'] ?? 'Wilayah Tidak Diketahui'),
+            'country' => $this->translateCountry($c['country'] ?? 'Negara Tidak Diketahui'),
         ];
     }
 
-    private function translateCountry($country)
+    // ─────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Build URL WeatherAPI dengan key & parameter tambahan.
+     */
+    private function buildUrl(string $endpoint, string $lokasi, array $extra = []): string
+    {
+        $apiKey  = config('services.weatherapi.key');
+        $baseUrl = config('services.weatherapi.base_url');
+
+        $params = array_merge(
+            ['key' => $apiKey, 'q' => $lokasi, 'aqi' => 'no', 'alerts' => 'no'],
+            $extra
+        );
+
+        return "{$baseUrl}/{$endpoint}?" . http_build_query($params);
+    }
+
+    /**
+     * Estimasi peluang hujan dari data per jam berdasarkan waktu sekarang.
+     */
+    private function estimateRainChance(array $hourlyData): ?int
+    {
+        $flatten = [];
+        foreach ($hourlyData as $perTanggal) {
+            foreach ($perTanggal as $jam) {
+                $flatten[] = $jam;
+            }
+        }
+
+        $now = (new \DateTime('now', new \DateTimeZone('Asia/Jakarta')))->format('Y-m-d H:00');
+
+        foreach ($flatten as $jam) {
+            $jamWaktu = \DateTime::createFromFormat(
+                'Y-m-d H:i', $jam['time'],
+                new \DateTimeZone('UTC')
+            );
+            if (!$jamWaktu) continue;
+
+            $jamWaktu->setTimezone(new \DateTimeZone('Asia/Jakarta'));
+            if ($jamWaktu->format('Y-m-d H:00') === $now) {
+                return $jam['values']['precipitationProbability'] ?? null;
+            }
+        }
+
+        return null;
+    }
+
+    private function translateCountry(string $country): string
     {
         $map = [
-            'Indonesia' => 'Indonesia',
+            'Indonesia'     => 'Indonesia',
             'United States' => 'Amerika Serikat',
-            'Japan' => 'Jepang',
-            'Malaysia' => 'Malaysia',
-            'Singapore' => 'Singapura',
-            'Thailand' => 'Thailand',
-            'Philippines' => 'Filipina',
-            // Tambahkan sesuai kebutuhan
+            'Japan'         => 'Jepang',
+            'Malaysia'      => 'Malaysia',
+            'Singapore'     => 'Singapura',
+            'Thailand'      => 'Thailand',
+            'Philippines'   => 'Filipina',
         ];
-
         return $map[$country] ?? $country;
     }
 
-    private function translateRegion($region)
+    private function translateRegion(string $region): string
     {
-        // Contoh konversi jika ingin nama provinsi disesuaikan
         $map = [
-            'East Java' => 'Jawa Timur',
-            'West Java' => 'Jawa Barat',
+            'East Java'    => 'Jawa Timur',
+            'West Java'    => 'Jawa Barat',
             'Central Java' => 'Jawa Tengah',
-            'Jakarta' => 'DKI Jakarta',
-            // Tambah jika perlu
+            'Jakarta'      => 'DKI Jakarta',
         ];
-
         return $map[$region] ?? $region;
     }
 
-    private function translateCity($city)
+    private function translateCity(string $city): string
     {
         $map = [
             'Kediri City' => 'Kota Kediri',
-            'Surabaya' => 'Surabaya',
-            'Jakarta' => 'Jakarta',
-            'Bandung' => 'Bandung',
-            // Tambah jika perlu
+            'Surabaya'    => 'Surabaya',
+            'Jakarta'     => 'Jakarta',
+            'Bandung'     => 'Bandung',
         ];
-
         return $map[$city] ?? $city;
     }
-
 }

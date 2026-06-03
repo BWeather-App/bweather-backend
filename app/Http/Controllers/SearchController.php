@@ -4,8 +4,6 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
-use Carbon\Carbon;
-use Illuminate\Support\Str;
 
 class SearchController extends Controller
 {
@@ -19,7 +17,8 @@ class SearchController extends Controller
 
     /**
      * Endpoint: GET /api/search
-     * Fungsi: Ambil cuaca 5 hari berdasarkan query atau lat/lon
+     * Fungsi: Ambil data cuaca lengkap 5 hari berdasarkan nama kota atau lat/lon.
+     * Response format: {location, weather} — sama dengan /api/weather.
      */
     public function searchByCityName(Request $request)
     {
@@ -30,68 +29,28 @@ class SearchController extends Controller
         $query = $request->query('query');
 
         if (!$lat || !$lon) {
-        if (!$query) {
-            return response()->json(['error' => 'Parameter query atau lat/lon dibutuhkan'], 400);
+            if (!$query) {
+                return response()->json(['error' => 'Parameter query atau lat/lon dibutuhkan'], 400);
+            }
+
+            $apiKey = env('GEOCODING_API_KEY');
+            $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=1";
+
+            $res = Http::get($url);
+            $data = $res->json();
+
+            if (!isset($data['results'][0]['geometry'])) {
+                return response()->json(['error' => 'Lokasi tidak ditemukan'], 404);
+            }
+
+            $lat = $data['results'][0]['geometry']['lat'];
+            $lon = $data['results'][0]['geometry']['lng'];
         }
-
-        $apiKey = env('GEOCODING_API_KEY');
-        $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=1";
-
-        $res = Http::get($url);
-        $data = $res->json();
-
-        if (!isset($data['results'][0]['geometry'])) {
-            return response()->json(['error' => 'Lokasi tidak ditemukan'], 404);
-        }
-
-        $lat = $data['results'][0]['geometry']['lat'];
-        $lon = $data['results'][0]['geometry']['lng'];
-        }
-
 
         $weatherController = new WeatherController();
-        $result = $weatherController->getWeatherByGPSManual($lat, $lon, true);
+        $result = $weatherController->getWeatherByGPSManual($lat, $lon);
 
-        $weather = $result['weather'];
-        $locationName = $result['location']['name'] ?? 'Lokasi';
-
-        $forecasts = [];
-
-        // Kemarin
-        $yesterday = $weather['kemarin'][0] ?? null;
-        if ($yesterday) {
-            $forecasts[] = [
-                'label' => 'Kemarin',
-                'tanggal' => Carbon::parse($yesterday['waktu'])->format('d/m'),
-                'ikon' => $this->mapWeatherIcon($yesterday),
-                'suhu' => round($yesterday['suhu'] ?? 0),
-            ];
-        }
-
-        // Hari ini hingga 4 hari ke depan
-        $labelMap = ['Hari Ini', 'Besok'];
-        $keys = ['hari_ini', 'besok','lusa' ,'hari_ke_3'];
-
-        foreach ($keys as $i => $key) {
-            $cuaca = $weather[$key][0] ?? null;
-            if (!$cuaca) continue;
-
-            $tanggal = Carbon::parse($cuaca['waktu']);
-            $label = $labelMap[$i] ?? Str::ucfirst($tanggal->translatedFormat('l'));
-
-            $forecasts[] = [
-                'label' => $label,
-                'tanggal' => $tanggal->format('d/m'),
-                'ikon' => $this->mapWeatherIcon($cuaca),
-                'suhu' => round($cuaca['suhu'] ?? $cuaca['max'] ?? $cuaca['min'] ?? 0),
-            ];
-
-        }
-
-        return response()->json([
-            'city' => $locationName,
-            'forecast' => $forecasts
-        ]);
+        return response()->json($result);
     }
 
 
@@ -151,20 +110,5 @@ class SearchController extends Controller
         }
 
         return response()->json($results);
-    }
-
-
-    /**
-     * Fungsi bantu: Ubah cuaca ke nama ikon
-     */
-    private function mapWeatherIcon($cuaca)
-    {
-        $v = strtolower($cuaca['cuaca'] ?? '');
-
-        if (str_contains($v, 'rain')) return 'rain';
-        if (str_contains($v, 'cloud')) return 'cloudy';
-        if (str_contains($v, 'sun') || str_contains($v, 'clear')) return 'sunny';
-
-        return 'cloudy'; // default
     }
 }

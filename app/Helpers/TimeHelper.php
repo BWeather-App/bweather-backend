@@ -15,16 +15,24 @@ class TimeHelper
         return $dt->format('Y-m-d H:i:s');
     }
 
-    public static function convertToWIBFromTimeOnly($date, $timeString)
-    {
-        if (!$date || !$timeString) return null;
+ public static function convertToWIBFromTimeOnly($date, $timeString)
+{
+    if (!$date || !$timeString) return null;
 
-        $dateTimeString = $date . ' ' . $timeString;
-        $dt = DateTime::createFromFormat('Y-m-d h:i A', $dateTimeString, new DateTimeZone('UTC'));
+    $dateTimeString = $date . ' ' . $timeString;
 
-        if (!$dt) return null;
+    // ⛳️ PARSING dengan TIMEZONE Asia/Jakarta
+    $dt = DateTime::createFromFormat(
+        'Y-m-d h:i A',
+        $dateTimeString,
+        new DateTimeZone('Asia/Jakarta') // <— waktu lokal sesuai data WeatherAPI
+    );
 
-        $dt->setTimezone(new DateTimeZone('Asia/Jakarta'));
-        return $dt->format('Y-m-d H:i:s');
-    }
+    if (!$dt) return null;
+
+    // Tidak perlu ubah timezone lagi, sudah WIB
+    return $dt->format('Y-m-d H:i:s');
+}
+
+
 }

@@ -1,61 +1,82 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# BWeather API
 
 <p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
+  <b>Laravel 12 · WeatherAPI · OpenCage</b><br>
+  Backend proxy for the BWeather Android app
 </p>
 
-## About Laravel
+Lightweight Laravel API that proxies requests to WeatherAPI and OpenCage Geocoding, with built-in caching and rate limiting.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Endpoints
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/weather?lat=&lon=` | 5-day weather data by GPS coordinates |
+| `GET` | `/api/search?query=` | Search weather by city name |
+| `GET` | `/api/suggestions?query=` | Autocomplete city suggestions (Indonesia) |
+| `GET` | `/api/ping` | Health check |
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+### Response Format
 
-## Learning Laravel
+```json
+{
+  "location": { "city": "Surabaya", "region": "Jawa Timur", "country": "Indonesia", "lat": -7.25, "lon": 112.75 },
+  "weather": {
+    "cuaca_saat_ini": { "suhu": 32, "kelembapan": 68, ... },
+    "kemarin": [ ... ],
+    "hari_ini": [ ... ],
+    "besok": [ ... ],
+    "lusa": [ ... ],
+    "hari_ke_3": [ ... ]
+  }
+}
+```
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+## Tech Stack
 
-You may also try the [Laravel Bootcamp](https://bootcamp.laravel.com), where you will be guided through building a modern Laravel application from scratch.
+| Technology | Purpose |
+|------------|---------|
+| Laravel 12 | API framework |
+| WeatherAPI | Weather data (current, forecast, history) |
+| OpenCage | Reverse geocoding & city search |
+| File Cache | 30-min coordinate-based caching |
+| Rate Limiter | 60 req/min per IP |
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+## Getting Started
 
-## Laravel Sponsors
+```bash
+# 1. Install dependencies
+composer install
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+# 2. Configure environment
+cp .env.example .env
+# Fill in: WEATHERAPI_API_KEY, GEOCODING_API_KEY
 
-### Premium Partners
+# 3. Generate app key
+php artisan key:generate
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+# 4. Run
+php artisan serve --host=0.0.0.0 --port=8000
+```
 
-## Contributing
+## Environment Variables
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```
+WEATHERAPI_API_KEY=      # https://www.weatherapi.com/
+WEATHERAPI_BASE_URL=     # https://api.weatherapi.com/v1
+GEOCODING_API_KEY=       # https://opencagedata.com/
+WEATHER_CACHE_TTL=30     # Cache duration in minutes
+```
 
-## Code of Conduct
+## Deploy (Render)
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
-
-## Security Vulnerabilities
-
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+```bash
+# 1. Push to GitHub
+# 2. Create Web Service on render.com → Docker
+# 3. Set environment variables in Render dashboard
+# 4. Deploy
+```
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+MIT

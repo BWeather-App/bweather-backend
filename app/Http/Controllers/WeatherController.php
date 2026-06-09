@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use App\Helpers\WeatherDataHelper;
 use App\Helpers\TimeHelper;
 
@@ -15,14 +16,18 @@ class WeatherController extends Controller
         $lat = $request->query('lat');
         $lon = $request->query('lon');
 
-        if (!$lat || !$lon) {
+        if (!$lat || !$lon || !is_numeric($lat) || !is_numeric($lon)) {
             return response()->json(
-                ['error' => 'Latitude dan longitude wajib diisi'],
+                ['error' => 'Latitude dan longitude wajib diisi dan harus berupa angka'],
                 400
             );
         }
 
         $result = $this->buildWeatherData($lat, $lon);
+
+        if (isset($result['weather']['cuaca_saat_ini']['error'])) {
+            return response()->json(['error' => 'Gagal mengambil data cuaca'], 502);
+        }
 
         return response()->json($result);
     }
@@ -57,22 +62,32 @@ class WeatherController extends Controller
     private function buildWeatherData($latitude, $longitude)
     {
         $cacheKey = 'weather_' . round($latitude, 3) . '_' . round($longitude, 3);
-        $ttl = (int) env('WEATHER_CACHE_TTL', 30);
+        $ttl = (int) config('weather.cache_ttl', 30);
 
         return Cache::remember($cacheKey, now()->addMinutes($ttl), function () use ($latitude, $longitude) {
         $lokasi = "$latitude,$longitude";
 
-        // ✅ 1 request untuk hourly + astronomy (sebelumnya 2 request)
-        ['hourly' => $perJam, 'astronomy' => $astronomi] =
+        // 1 request untuk hourly + astronomy (sebelumnya 2 request)
+        ['hourly' => $perJam, 'astronomy' => $astronomi, 'dates' => $forecastDates] =
             $this->getForecastAndAstronomy($lokasi);
 
         $kemarin  = $this->getYesterdayWeather($lokasi);
         $realtime = $this->getRealtimeWeather($lokasi, $perJam);
 
-        $hariIni = date('Y-m-d');
-        $besok   = date('Y-m-d', strtotime('+1 day'));
-        $lusa    = date('Y-m-d', strtotime('+2 day'));
-        $hariKe3 = date('Y-m-d', strtotime('+3 day'));
+        $hariIni = $forecastDates[0] ?? date('Y-m-d');
+        $besok   = $forecastDates[1] ?? date('Y-m-d', strtotime('+1 day'));
+        $lusa    = $forecastDates[2] ?? date('Y-m-d', strtotime('+2 day'));
+        $hariKe3 = $forecastDates[3] ?? date('Y-m-d', strtotime('+3 day'));
+
+        if (empty($perJam[$hariKe3]) && !empty($perJam[$lusa])) {
+            $estimasi = [];
+            foreach ($perJam[$lusa] as $item) {
+                $shifted = $item;
+                $shifted['time'] = date('Y-m-d H:i', strtotime($item['time'] . ' +1 day'));
+                $estimasi[] = $shifted;
+            }
+            $perJam[$hariKe3] = $estimasi;
+        }
 
         $dataCuaca = [
             'cuaca_saat_ini' => $realtime,
@@ -111,21 +126,26 @@ class WeatherController extends Controller
     {
         $url = $this->buildUrl('current.json', $lokasi);
 
-        // ✅ Http facade — bukan curl manual
-        $response = Http::timeout(10)->get($url);
+        try {
+            $response = Http::timeout(10)->get($url);
+        } catch (\Exception $e) {
+            Log::warning('WeatherAPI current failed', ['error' => $e->getMessage()]);
+            return ['error' => 'Data realtime tidak ditemukan'];
+        }
 
         if ($response->failed()) {
-            return ['kesalahan' => 'Data realtime tidak ditemukan'];
+            Log::warning('WeatherAPI current failed', ['status' => $response->status()]);
+            return ['error' => 'Data realtime tidak ditemukan'];
         }
 
         $data = $response->json();
         if (!isset($data['current'])) {
-            return ['kesalahan' => 'Data realtime tidak ditemukan'];
+            return ['error' => 'Data realtime tidak ditemukan'];
         }
 
         $v = $data['current'];
+        $c = $v['condition'] ?? [];
 
-        // Estimasi peluang hujan dari data forecast per jam
         $peluangHujan = $this->estimateRainChance($hourlyData);
 
         return [
@@ -138,6 +158,9 @@ class WeatherController extends Controller
             'indeks_uv'      => $v['uv'] ?? null,
             'terasa_seperti' => $v['feelslike_c'] ?? null,
             'peluang_hujan'  => $peluangHujan,
+            'kondisi_cuaca'  => $c['text'] ?? null,
+            'ikon_cuaca'     => $c['icon'] ?? null,
+            'kode_cuaca'     => $c['code'] ?? null,
         ];
     }
 
@@ -152,11 +175,16 @@ class WeatherController extends Controller
     {
         $url = $this->buildUrl('forecast.json', $lokasi, ['days' => 5]);
 
-        // ✅ Http facade — bukan curl manual
-        $response = Http::timeout(10)->get($url);
+        try {
+            $response = Http::timeout(10)->get($url);
+        } catch (\Exception $e) {
+            Log::warning('WeatherAPI forecast failed', ['error' => $e->getMessage()]);
+            return ['hourly' => [], 'astronomy' => [], 'dates' => []];
+        }
 
         if ($response->failed()) {
-            return ['hourly' => [], 'astronomy' => []];
+            Log::warning('WeatherAPI forecast failed', ['status' => $response->status()]);
+            return ['hourly' => [], 'astronomy' => [], 'dates' => []];
         }
 
         $data = $response->json();
@@ -167,12 +195,18 @@ class WeatherController extends Controller
 
         $hourlyRaw  = [];
         $astronomyResult = [];
+        $forecastDates = [];
 
         foreach ($data['forecast']['forecastday'] as $day) {
             $tanggal = $day['date'] ?? null;
 
+            if ($tanggal) {
+                $forecastDates[] = $tanggal;
+            }
+
             // Hourly data
             foreach ($day['hour'] as $jam) {
+                $c = $jam['condition'] ?? [];
                 $hourlyRaw[] = [
                     'time'   => $jam['time'],
                     'values' => [
@@ -184,6 +218,9 @@ class WeatherController extends Controller
                         'uvIndex'                 => $jam['uv'] ?? null,
                         'temperatureApparent'     => $jam['feelslike_c'] ?? null,
                         'precipitationProbability'=> $jam['chance_of_rain'] ?? null,
+                        'kondisi_cuaca'           => $c['text'] ?? null,
+                        'ikon_cuaca'              => $c['icon'] ?? null,
+                        'kode_cuaca'              => $c['code'] ?? null,
                     ],
                 ];
             }
@@ -203,6 +240,7 @@ class WeatherController extends Controller
         return [
             'hourly'    => WeatherDataHelper::groupByDate($hourlyRaw),
             'astronomy' => $astronomyResult,
+            'dates'     => $forecastDates,
         ];
     }
 
@@ -215,16 +253,24 @@ class WeatherController extends Controller
         $tanggalKemarin = date('Y-m-d', strtotime('-1 day'));
         $url = $this->buildUrl('history.json', $lokasi, ['dt' => $tanggalKemarin]);
 
-        // ✅ Http facade — bukan curl manual
-        $response = Http::timeout(10)->get($url);
+        try {
+            $response = Http::timeout(10)->get($url);
+        } catch (\Exception $e) {
+            Log::warning('WeatherAPI history failed', ['error' => $e->getMessage()]);
+            return [];
+        }
 
-        if ($response->failed()) return [];
+        if ($response->failed()) {
+            Log::warning('WeatherAPI history failed', ['status' => $response->status()]);
+            return [];
+        }
 
         $data = $response->json();
         if (!isset($data['forecast']['forecastday'][0]['hour'])) return [];
 
         $hasil = [];
         foreach ($data['forecast']['forecastday'][0]['hour'] as $jam) {
+            $c = $jam['condition'] ?? [];
             $hasil[] = [
                 'time'   => $jam['time'],
                 'values' => [
@@ -236,6 +282,9 @@ class WeatherController extends Controller
                     'uvIndex'                 => $jam['uv'] ?? null,
                     'temperatureApparent'     => $jam['feelslike_c'] ?? null,
                     'precipitationProbability'=> $jam['chance_of_rain'] ?? null,
+                    'kondisi_cuaca'           => $c['text'] ?? null,
+                    'ikon_cuaca'              => $c['icon'] ?? null,
+                    'kode_cuaca'              => $c['code'] ?? null,
                 ],
             ];
         }
@@ -249,11 +298,16 @@ class WeatherController extends Controller
 
     private function getPlaceNameFromLatLon($lat, $lon): array
     {
-        $apiKey = env('GEOCODING_API_KEY');
-        $response = Http::timeout(10)->get(
-            "https://api.opencagedata.com/geocode/v1/json",
-            ['q' => "$lat+$lon", 'key' => $apiKey]
-        );
+        $apiKey = config('services.geocoding.key');
+        try {
+            $response = Http::timeout(10)->get(
+                "https://api.opencagedata.com/geocode/v1/json",
+                ['q' => "$lat+$lon", 'key' => $apiKey]
+            );
+        } catch (\Exception $e) {
+            Log::warning('Geocoding failed', ['error' => $e->getMessage()]);
+            return ['city' => 'Tidak Diketahui', 'region' => '', 'country' => ''];
+        }
 
         if ($response->failed()) {
             return ['city' => 'Tidak Diketahui', 'region' => '', 'country' => ''];

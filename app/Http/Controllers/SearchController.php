@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class SearchController extends Controller
 {
@@ -22,8 +23,6 @@ class SearchController extends Controller
      */
     public function searchByCityName(Request $request)
     {
-        header('Access-Control-Allow-Origin: *');
-
         $lat = $request->query('lat');
         $lon = $request->query('lon');
         $query = $request->query('query');
@@ -33,10 +32,15 @@ class SearchController extends Controller
                 return response()->json(['error' => 'Parameter query atau lat/lon dibutuhkan'], 400);
             }
 
-            $apiKey = env('GEOCODING_API_KEY');
+            $apiKey = config('services.geocoding.key');
             $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=1";
 
-            $res = Http::get($url);
+            try {
+                $res = Http::timeout(10)->get($url);
+            } catch (\Exception $e) {
+                Log::warning('Geocoding search failed', ['error' => $e->getMessage()]);
+                return response()->json(['error' => 'Gagal mencari lokasi'], 502);
+            }
             $data = $res->json();
 
             if (!isset($data['results'][0]['geometry'])) {
@@ -47,7 +51,7 @@ class SearchController extends Controller
             $lon = $data['results'][0]['geometry']['lng'];
         }
 
-        $weatherController = new WeatherController();
+        $weatherController = app(WeatherController::class);
         $result = $weatherController->getWeatherByGPSManual($lat, $lon);
 
         return response()->json($result);
@@ -65,11 +69,15 @@ class SearchController extends Controller
             return response()->json(['error' => 'Parameter query tidak ditemukan'], 400);
         }
 
-        $apiKey = env('GEOCODING_API_KEY');
+        $apiKey = config('services.geocoding.key');
         $url = "https://api.opencagedata.com/geocode/v1/json?q=" . urlencode($query) . "&key={$apiKey}&limit=10&countrycode=id&language=id";
 
-
-        $response = Http::get($url);
+        try {
+            $response = Http::timeout(10)->get($url);
+        } catch (\Exception $e) {
+            Log::warning('Geocoding suggestions failed', ['error' => $e->getMessage()]);
+            return response()->json(['error' => 'Gagal mencari saran lokasi'], 502);
+        }
         $data = $response->json();
 
         if (!isset($data['results']) || empty($data['results'])) {

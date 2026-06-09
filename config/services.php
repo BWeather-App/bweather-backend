@@ -36,9 +36,12 @@ return [
     // ],
 
     'weatherapi' => [
-    'key' => env('WEATHERAPI_API_KEY'),
-    'base_url' => env('WEATHERAPI_BASE_URL'),
-],
+        'key' => env('WEATHERAPI_API_KEY'),
+        'base_url' => env('WEATHERAPI_BASE_URL'),
+    ],
 
+    'geocoding' => [
+        'key' => env('GEOCODING_API_KEY'),
+    ],
 
 ];

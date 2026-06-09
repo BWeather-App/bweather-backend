@@ -9,12 +9,8 @@ class ApiKeyMiddleware
 {
     public function handle(Request $request, Closure $next)
     {
-        $expectedKey = env('API_SECRET_KEY', '');
+        $expectedKey = config('app.api_secret_key', '');
         $providedKey = $request->header('X-API-Key');
-
-        if (empty($expectedKey)) {
-            return $next($request);
-        }
 
         if ($providedKey !== $expectedKey) {
             return response()->json(['error' => 'Unauthorized'], 401);

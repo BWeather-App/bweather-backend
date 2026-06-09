@@ -1,0 +1,13 @@
+.git/
+vendor/
+node_modules/
+.env
+.env.backup
+.env.production
+*.md
+storage/logs/
+storage/framework/sessions/
+storage/framework/views/
+storage/framework/cache/
+tests/
+cacert.pem

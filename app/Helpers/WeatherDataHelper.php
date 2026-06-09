@@ -33,6 +33,9 @@ class WeatherDataHelper
                 'indeks_uv' => $v['uvIndex'] ?? null,
                 'terasa_seperti' => $v['temperatureApparent'] ?? null,
                 'peluang_hujan' => $v['precipitationProbability'] ?? null,
+                'kondisi_cuaca' => $v['kondisi_cuaca'] ?? null,
+                'ikon_cuaca'    => $v['ikon_cuaca'] ?? null,
+                'kode_cuaca'    => $v['kode_cuaca'] ?? null,
             ];
         }
         return $hasil;
@@ -55,6 +58,9 @@ class WeatherDataHelper
                 'indeks_uv' => $v['uvIndex'] ?? null,
                 'terasa_seperti' => $v['temperatureApparent'] ?? null,
                 'peluang_hujan' => $v['precipitationProbability'] ?? null,
+                'kondisi_cuaca' => $v['kondisi_cuaca'] ?? null,
+                'ikon_cuaca'    => $v['ikon_cuaca'] ?? null,
+                'kode_cuaca'    => $v['kode_cuaca'] ?? null,
                 'matahari_terbit' => $astronomi['matahari_terbit'] ?? null,
                 'matahari_terbenam' => $astronomi['matahari_terbenam'] ?? null,
                 'bulan_terbit' => $astronomi['bulan_terbit'] ?? null,
